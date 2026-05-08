@@ -1,0 +1,11 @@
+torch>=2.0.0
+torchvision
+numpy
+spacy>=3.0.0
+datasets>=2.0.0
+wandb>=0.15.0
+matplotlib>=3.5.0
+scikit-learn>=1.0.0
+evaluate>=0.4.0
+tqdm>=4.60.0
+gdown>=4.7.0
