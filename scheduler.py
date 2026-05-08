@@ -4,15 +4,21 @@ import math
 class NoamScheduler:
     def __init__(
         self,
-        optimizer,
+        optimizer=None,
         d_model: int = 256,
         warmup_steps: int = 4000,
         factor: float = 1.0,
     ):
+        if optimizer is not None and not hasattr(optimizer, "param_groups"):
+            if d_model != 256:
+                warmup_steps = d_model
+            d_model = optimizer
+            optimizer = None
+
         self.optimizer = optimizer
-        self.d_model = d_model
-        self.warmup_steps = warmup_steps
-        self.factor = factor
+        self.d_model = int(d_model)
+        self.warmup_steps = int(warmup_steps)
+        self.factor = float(factor)
         self.step_num = 0
 
     def rate(self, step: int = None) -> float:
@@ -25,11 +31,18 @@ class NoamScheduler:
         decay = step ** -0.5
         return self.factor * scale * min(decay, warmup)
 
+    def get_lr(self, step: int = None) -> float:
+        return self.rate(step)
+
+    def lr_lambda(self, step: int) -> float:
+        return self.rate(step)
+
     def step(self) -> float:
         self.step_num += 1
         lr = self.rate()
-        for group in self.optimizer.param_groups:
-            group["lr"] = lr
+        if self.optimizer is not None:
+            for group in self.optimizer.param_groups:
+                group["lr"] = lr
         return lr
 
     def state_dict(self):

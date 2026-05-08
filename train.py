@@ -324,10 +324,30 @@ def run_training(config):
 
             if valid_bleu > best_bleu:
                 best_bleu = valid_bleu
-                save_checkpoint(best_path, model, optimizer, scheduler, epoch, best_bleu, config)
+                save_checkpoint(
+                    best_path,
+                    model,
+                    optimizer,
+                    scheduler,
+                    epoch,
+                    best_bleu,
+                    config,
+                    src_vocab=src_vocab,
+                    tgt_vocab=tgt_vocab,
+                )
                 print(f"Saved best checkpoint with BLEU {best_bleu:.2f}")
 
-        save_checkpoint(last_path, model, optimizer, scheduler, epoch, best_bleu, config)
+        save_checkpoint(
+            last_path,
+            model,
+            optimizer,
+            scheduler,
+            epoch,
+            best_bleu,
+            config,
+            src_vocab=src_vocab,
+            tgt_vocab=tgt_vocab,
+        )
 
     if test_loader is not None:
         test_bleu = evaluate_bleu(model, test_loader, tgt_vocab, device, max_len=config["decode_max_len"])

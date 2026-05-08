@@ -184,13 +184,24 @@ def save_checkpoint(
     epoch: int,
     best_bleu: float,
     config: Dict,
+    src_vocab=None,
+    tgt_vocab=None,
 ) -> None:
+    src_vocab_data = None
+    tgt_vocab_data = None
+    if src_vocab is not None:
+        src_vocab_data = {"stoi": src_vocab.stoi, "itos": src_vocab.itos}
+    if tgt_vocab is not None:
+        tgt_vocab_data = {"stoi": tgt_vocab.stoi, "itos": tgt_vocab.itos}
+
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save(
         {
             "epoch": epoch,
             "best_bleu": best_bleu,
             "config": config,
+            "src_vocab": src_vocab_data,
+            "tgt_vocab": tgt_vocab_data,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,

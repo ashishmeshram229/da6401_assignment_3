@@ -16,7 +16,7 @@ EOS_TOKEN = "<eos>"
 
 
 # Fill this after uploading the best checkpoint to Google Drive.
-DEFAULT_GOOGLE_DRIVE_FILE_ID = os.environ.get("1L3jxdZv0xg_bwtRzKaIwH60FhsGarrKV", "")
+DEFAULT_GOOGLE_DRIVE_FILE_ID = os.environ.get("1smD10MS5ALP3cviA26Q6vd9-sLraKWbF", "")
 
 
 def get_default_device() -> torch.device:
@@ -73,6 +73,25 @@ def load_vocab(path: str) -> SimpleVocab:
         return SimpleVocab({token: i for i, token in enumerate(data)}, data)
 
     raise ValueError(f"Unsupported vocab format in {path}")
+
+
+def vocab_from_data(data) -> Optional[SimpleVocab]:
+    if data is None:
+        return None
+    if isinstance(data, SimpleVocab):
+        return data
+    if isinstance(data, dict) and "stoi" in data:
+        return SimpleVocab(data["stoi"], data.get("itos"))
+    if isinstance(data, dict):
+        return SimpleVocab(data)
+    if isinstance(data, list):
+        return SimpleVocab({token: i for i, token in enumerate(data)}, data)
+    return None
+
+
+def fallback_vocab() -> SimpleVocab:
+    tokens = [PAD_TOKEN, UNK_TOKEN, SOS_TOKEN, EOS_TOKEN]
+    return SimpleVocab({token: i for i, token in enumerate(tokens)}, tokens)
 
 
 def clean_translation(text: str) -> str:
@@ -142,6 +161,11 @@ class ScaledDotProductAttention(nn.Module):
             scores = scores / math.sqrt(query.size(-1))
 
         if mask is not None:
+            if mask.dim() == 2:
+                mask = mask.unsqueeze(0).unsqueeze(0)
+            elif mask.dim() == 3:
+                mask = mask.unsqueeze(1)
+            mask = mask.to(device=scores.device)
             scores = scores.masked_fill(mask == 0, -1e9)
 
         attention = torch.softmax(scores, dim=-1)
@@ -173,6 +197,7 @@ class MultiHeadAttention(nn.Module):
 
         self.attention = ScaledDotProductAttention(dropout=dropout, use_scaling=use_scaling)
         self.dropout = nn.Dropout(dropout)
+        self.attention_weights = None
 
     def split_heads(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, _ = x.size()
@@ -190,15 +215,21 @@ class MultiHeadAttention(nn.Module):
         key: torch.Tensor,
         value: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return_attention: bool = False,
+    ):
         q = self.split_heads(self.w_q(query))
         k = self.split_heads(self.w_k(key))
         v = self.split_heads(self.w_v(value))
 
         output, attention = self.attention(q, k, v, mask)
+        self.attention_weights = attention
         output = self.combine_heads(output)
         output = self.fc_out(output)
-        return self.dropout(output), attention
+        output = self.dropout(output)
+
+        if return_attention:
+            return output, attention
+        return output
 
 
 class PositionalEncoding(nn.Module):
@@ -264,7 +295,7 @@ class EncoderLayer(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, src: torch.Tensor, src_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        attention_output, attention = self.self_attention(src, src, src, src_mask)
+        attention_output, attention = self.self_attention(src, src, src, src_mask, return_attention=True)
         src = self.norm1(src + self.dropout(attention_output))
 
         ff_output = self.feed_forward(src)
@@ -298,10 +329,12 @@ class DecoderLayer(nn.Module):
         tgt_mask: torch.Tensor,
         src_mask: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        self_output, self_attention = self.self_attention(tgt, tgt, tgt, tgt_mask)
+        self_output, self_attention = self.self_attention(tgt, tgt, tgt, tgt_mask, return_attention=True)
         tgt = self.norm1(tgt + self.dropout(self_output))
 
-        cross_output, cross_attention = self.cross_attention(tgt, memory, memory, src_mask)
+        cross_output, cross_attention = self.cross_attention(
+            tgt, memory, memory, src_mask, return_attention=True
+        )
         tgt = self.norm2(tgt + self.dropout(cross_output))
 
         ff_output = self.feed_forward(tgt)
@@ -427,6 +460,8 @@ class Transformer(nn.Module):
         super().__init__()
 
         base_dir = os.path.dirname(os.path.abspath(__file__))
+        requested_src_vocab_size = src_vocab_size
+        requested_tgt_vocab_size = tgt_vocab_size
         self.device_name = device if device is not None else get_default_device()
         self.d_model = d_model
         self.num_heads = num_heads
@@ -440,8 +475,22 @@ class Transformer(nn.Module):
         tgt_vocab_path = tgt_vocab_path or os.path.join(base_dir, "vocab", "tgt_vocab.json")
         self.weight_path = weight_path or os.path.join(base_dir, "checkpoints", "transformer_best.pt")
 
+        if load_weights:
+            self._download_weights_if_needed(google_drive_file_id)
+
+        checkpoint = self._read_checkpoint() if load_weights else None
+
         self.src_vocab = load_vocab(src_vocab_path) if os.path.exists(src_vocab_path) else None
         self.tgt_vocab = load_vocab(tgt_vocab_path) if os.path.exists(tgt_vocab_path) else None
+
+        if checkpoint is not None and isinstance(checkpoint, dict):
+            self.src_vocab = self.src_vocab or vocab_from_data(checkpoint.get("src_vocab"))
+            self.tgt_vocab = self.tgt_vocab or vocab_from_data(checkpoint.get("tgt_vocab"))
+
+        if self.src_vocab is None and requested_src_vocab_size is None:
+            self.src_vocab = fallback_vocab()
+        if self.tgt_vocab is None and requested_tgt_vocab_size is None:
+            self.tgt_vocab = fallback_vocab()
 
         if self.src_vocab is not None:
             src_vocab_size = len(self.src_vocab)
@@ -450,6 +499,15 @@ class Transformer(nn.Module):
         if self.tgt_vocab is not None:
             tgt_vocab_size = len(self.tgt_vocab)
             tgt_pad_idx = self.tgt_vocab.pad_idx
+
+        state_dict = self._state_dict_from_checkpoint(checkpoint)
+        if state_dict is not None:
+            src_weight = state_dict.get("encoder.token_embedding.weight")
+            tgt_weight = state_dict.get("decoder.token_embedding.weight")
+            if src_weight is not None:
+                src_vocab_size = src_weight.size(0)
+            if tgt_weight is not None:
+                tgt_vocab_size = tgt_weight.size(0)
 
         src_vocab_size = src_vocab_size or 12000
         tgt_vocab_size = tgt_vocab_size or 12000
@@ -484,8 +542,7 @@ class Transformer(nn.Module):
         self.to(self.device_name)
 
         if load_weights:
-            self._download_weights_if_needed(google_drive_file_id)
-            self._load_weights_if_available()
+            self._load_weights_if_available(checkpoint)
 
     def make_src_mask(self, src: torch.Tensor) -> torch.Tensor:
         return (src != self.src_pad_idx).unsqueeze(1).unsqueeze(2)
@@ -597,18 +654,26 @@ class Transformer(nn.Module):
 
         gdown.download(id=google_drive_file_id, output=self.weight_path, quiet=False)
 
-    def _load_weights_if_available(self) -> None:
+    def _read_checkpoint(self):
         if not os.path.exists(self.weight_path):
-            return
+            return None
 
-        checkpoint = torch.load(self.weight_path, map_location=self.device_name)
+        return torch.load(self.weight_path, map_location=self.device_name)
 
+    def _state_dict_from_checkpoint(self, checkpoint):
+        if checkpoint is None:
+            return None
         if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-            state_dict = checkpoint["model_state_dict"]
-        elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
-            state_dict = checkpoint["state_dict"]
-        else:
-            state_dict = checkpoint
+            return checkpoint["model_state_dict"]
+        if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+            return checkpoint["state_dict"]
+        return checkpoint
+
+    def _load_weights_if_available(self, checkpoint=None) -> None:
+        checkpoint = checkpoint if checkpoint is not None else self._read_checkpoint()
+        state_dict = self._state_dict_from_checkpoint(checkpoint)
+        if state_dict is None:
+            return
 
         self.load_state_dict(state_dict, strict=True)
         self.to(self.device_name)
