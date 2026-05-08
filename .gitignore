@@ -1,0 +1,11 @@
+/__pychache__/*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.so
+*.egg
+*.egg-info
+/checkpoints
+/reports
+/vocab
+/wandb
