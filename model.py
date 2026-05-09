@@ -16,7 +16,7 @@ EOS_TOKEN = "<eos>"
 
 
 # Fill this after uploading the best checkpoint to Google Drive.
-DEFAULT_GOOGLE_DRIVE_FILE_ID = os.environ.get("1AVB2k6QP0zPLj5IxLV3me0key02PlHLu", "")
+DEFAULT_GOOGLE_DRIVE_FILE_ID = os.environ.get("11rive_Ts79yNGn7VTDTPXRlTMq2ddG6b", "")
 
 
 def get_default_device() -> torch.device:
@@ -212,6 +212,48 @@ class MultiHeadAttention(nn.Module):
         x = x.transpose(1, 2).contiguous()
         return x.view(batch_size, seq_len, self.d_model)
 
+    def get_query_mask(
+        self,
+        mask: Optional[torch.Tensor],
+        query_len: int,
+        key_len: int,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Optional[torch.Tensor]:
+        if mask is None:
+            return None
+
+        keep_mask = mask
+        if keep_mask.dtype == torch.bool:
+            keep_mask = keep_mask.to(dtype=dtype)
+
+        if keep_mask.dim() == 2 and keep_mask.size(0) == batch_size:
+            if keep_mask.size(1) == query_len:
+                return keep_mask.to(device=device, dtype=dtype).unsqueeze(-1)
+
+        if keep_mask.dim() == 3 and keep_mask.size(0) == batch_size:
+            if query_len == key_len and keep_mask.size(1) == query_len and keep_mask.size(2) == key_len:
+                columns = keep_mask.to(device=device, dtype=dtype).sum(dim=1) > 0
+                return columns.to(dtype=dtype).unsqueeze(-1)
+            if keep_mask.size(1) == query_len and keep_mask.size(2) == key_len:
+                rows = keep_mask.to(device=device, dtype=dtype).sum(dim=-1) > 0
+                return rows.to(dtype=dtype).unsqueeze(-1)
+            if keep_mask.size(1) == 1 and keep_mask.size(2) == query_len:
+                return keep_mask[:, 0, :].to(device=device, dtype=dtype).unsqueeze(-1)
+
+        if keep_mask.dim() == 4 and keep_mask.size(0) == batch_size:
+            if query_len == key_len and keep_mask.size(-2) == query_len and keep_mask.size(-1) == key_len:
+                columns = keep_mask.to(device=device, dtype=dtype).sum(dim=1).sum(dim=-2) > 0
+                return columns.to(dtype=dtype).unsqueeze(-1)
+            if keep_mask.size(-2) == query_len and keep_mask.size(-1) == key_len:
+                rows = keep_mask.to(device=device, dtype=dtype).sum(dim=1).sum(dim=-1) > 0
+                return rows.to(dtype=dtype).unsqueeze(-1)
+            if keep_mask.size(-2) == 1 and keep_mask.size(-1) == query_len:
+                return keep_mask[:, 0, 0, :].to(device=device, dtype=dtype).unsqueeze(-1)
+
+        return None
+
     def forward(
         self,
         query: torch.Tensor,
@@ -220,10 +262,14 @@ class MultiHeadAttention(nn.Module):
         mask: Optional[torch.Tensor] = None,
         return_attention: bool = False,
     ):
-        query_mask = None
-        if mask is not None and mask.dim() == 2 and mask.size(0) == query.size(0):
-            if mask.size(1) == query.size(1):
-                query_mask = mask.unsqueeze(-1).to(device=query.device, dtype=query.dtype)
+        query_mask = self.get_query_mask(
+            mask,
+            query_len=query.size(1),
+            key_len=key.size(1),
+            batch_size=query.size(0),
+            device=query.device,
+            dtype=query.dtype,
+        )
 
         q = self.split_heads(self.w_q(query))
         k = self.split_heads(self.w_k(key))
