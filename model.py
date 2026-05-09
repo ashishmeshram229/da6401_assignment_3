@@ -16,7 +16,7 @@ EOS_TOKEN = "<eos>"
 
 
 # Fill this after uploading the best checkpoint to Google Drive.
-DEFAULT_GOOGLE_DRIVE_FILE_ID = os.environ.get("1smD10MS5ALP3cviA26Q6vd9-sLraKWbF", "")
+DEFAULT_GOOGLE_DRIVE_FILE_ID = os.environ.get("1AVB2k6QP0zPLj5IxLV3me0key02PlHLu", "")
 
 
 def get_default_device() -> torch.device:
@@ -162,7 +162,10 @@ class ScaledDotProductAttention(nn.Module):
 
         if mask is not None:
             if mask.dim() == 2:
-                mask = mask.unsqueeze(0).unsqueeze(0)
+                if mask.size(0) == query.size(0) and mask.size(1) == key.size(-2):
+                    mask = mask.unsqueeze(1).unsqueeze(2)
+                else:
+                    mask = mask.unsqueeze(0).unsqueeze(0)
             elif mask.dim() == 3:
                 mask = mask.unsqueeze(1)
             mask = mask.to(device=scores.device)
@@ -217,6 +220,11 @@ class MultiHeadAttention(nn.Module):
         mask: Optional[torch.Tensor] = None,
         return_attention: bool = False,
     ):
+        query_mask = None
+        if mask is not None and mask.dim() == 2 and mask.size(0) == query.size(0):
+            if mask.size(1) == query.size(1):
+                query_mask = mask.unsqueeze(-1).to(device=query.device, dtype=query.dtype)
+
         q = self.split_heads(self.w_q(query))
         k = self.split_heads(self.w_k(key))
         v = self.split_heads(self.w_v(value))
@@ -226,6 +234,9 @@ class MultiHeadAttention(nn.Module):
         output = self.combine_heads(output)
         output = self.fc_out(output)
         output = self.dropout(output)
+
+        if query_mask is not None:
+            output = output * query_mask
 
         if return_attention:
             return output, attention
