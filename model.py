@@ -1,5 +1,3 @@
-
-
 import json
 import math
 import os
@@ -19,6 +17,7 @@ EOS_TOKEN = "<eos>"
 
 # Fill this after uploading the best checkpoint to Google Drive.
 DEFAULT_GOOGLE_DRIVE_FILE_ID = os.environ.get("11rive_Ts79yNGn7VTDTPXRlTMq2ddG6b", "")
+
 
 def get_default_device() -> torch.device:
     return torch.device("mps" if torch.backends.mps.is_available() else "cpu")
@@ -549,6 +548,20 @@ class Transformer(nn.Module):
             self._download_weights_if_needed(google_drive_file_id)
 
         checkpoint = self._read_checkpoint() if load_weights else None
+        checkpoint_config = checkpoint.get("config", {}) if isinstance(checkpoint, dict) else {}
+
+        d_model = checkpoint_config.get("d_model", d_model)
+        num_heads = checkpoint_config.get("num_heads", num_heads)
+        num_layers = checkpoint_config.get("num_layers", num_layers)
+        d_ff = checkpoint_config.get("d_ff", d_ff)
+        dropout = checkpoint_config.get("dropout", dropout)
+        max_len = checkpoint_config.get("max_len", max_len)
+        positional_encoding = checkpoint_config.get("positional_encoding", positional_encoding)
+        use_scaling = checkpoint_config.get("use_scaling", use_scaling)
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.num_layers = num_layers
+        self.max_len = max_len
 
         self.src_vocab = load_vocab(src_vocab_path) if os.path.exists(src_vocab_path) else None
         self.tgt_vocab = load_vocab(tgt_vocab_path) if os.path.exists(tgt_vocab_path) else None
@@ -679,7 +692,61 @@ class Transformer(nn.Module):
         return generated.squeeze(0).tolist(), last_attention
 
     @torch.no_grad()
-    def infer(self, german_sentence: str, max_len: int = 80) -> str:
+    def beam_search_decode(
+        self,
+        src: torch.Tensor,
+        max_len: int = 80,
+        beam_size: int = 4,
+        length_penalty: float = 0.6,
+    ) -> List[int]:
+        self.eval()
+        src = src.to(next(self.parameters()).device)
+        memory, src_mask, _ = self.encode(src)
+
+        if self.tgt_vocab is None:
+            raise RuntimeError("Target vocabulary is missing. Add vocab/tgt_vocab.json before inference.")
+
+        start = self.tgt_vocab.sos_idx
+        end = self.tgt_vocab.eos_idx
+        beams = [(torch.tensor([[start]], device=src.device, dtype=torch.long), 0.0)]
+        finished = []
+
+        for _ in range(max_len - 1):
+            candidates = []
+
+            for tokens, score in beams:
+                if tokens[0, -1].item() == end:
+                    finished.append((tokens, score))
+                    candidates.append((tokens, score))
+                    continue
+
+                logits, _ = self.decode(tokens, memory, src_mask)
+                log_probs = F.log_softmax(logits[:, -1], dim=-1)
+                top_scores, top_ids = torch.topk(log_probs, beam_size, dim=-1)
+
+                for i in range(beam_size):
+                    next_id = top_ids[0, i].view(1, 1)
+                    next_score = score + top_scores[0, i].item()
+                    next_tokens = torch.cat([tokens, next_id], dim=1)
+                    candidates.append((next_tokens, next_score))
+
+            def normalized(item):
+                tokens, score = item
+                length = max(tokens.size(1) - 1, 1)
+                penalty = ((5.0 + length) / 6.0) ** length_penalty
+                return score / penalty
+
+            beams = sorted(candidates, key=normalized, reverse=True)[:beam_size]
+
+            if all(tokens[0, -1].item() == end for tokens, _ in beams):
+                break
+
+        finished.extend(beams)
+        best_tokens, _ = max(finished, key=lambda item: item[1] / (((5.0 + max(item[0].size(1) - 1, 1)) / 6.0) ** length_penalty))
+        return best_tokens.squeeze(0).tolist()
+
+    @torch.no_grad()
+    def infer(self, german_sentence: str, max_len: int = 80, beam_size: int = 4) -> str:
         if self.src_vocab is None:
             raise RuntimeError("Source vocabulary is missing. Add vocab/src_vocab.json before inference.")
         if self.tgt_vocab is None:
@@ -689,7 +756,10 @@ class Transformer(nn.Module):
         ids = self.src_vocab.encode(tokens, add_special_tokens=True)
         src = torch.tensor(ids, dtype=torch.long, device=next(self.parameters()).device).unsqueeze(0)
 
-        output_ids, _ = self.greedy_decode(src, max_len=max_len)
+        if beam_size and beam_size > 1:
+            output_ids = self.beam_search_decode(src, max_len=max_len, beam_size=beam_size)
+        else:
+            output_ids, _ = self.greedy_decode(src, max_len=max_len)
         return self.tgt_vocab.decode(output_ids)
 
     def get_attention_rollout(self, attention_maps: List[torch.Tensor]) -> torch.Tensor:
