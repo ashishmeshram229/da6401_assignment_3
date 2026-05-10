@@ -1,3 +1,5 @@
+
+
 import json
 import math
 import os
@@ -17,7 +19,6 @@ EOS_TOKEN = "<eos>"
 
 # Fill this after uploading the best checkpoint to Google Drive.
 DEFAULT_GOOGLE_DRIVE_FILE_ID = os.environ.get("11rive_Ts79yNGn7VTDTPXRlTMq2ddG6b", "")
-
 
 def get_default_device() -> torch.device:
     return torch.device("mps" if torch.backends.mps.is_available() else "cpu")
@@ -108,6 +109,19 @@ def clean_translation(text: str) -> str:
     return text.strip()
 
 
+def mask_to_keep(mask: torch.Tensor) -> torch.Tensor:
+    if mask.dtype == torch.bool:
+        flat = mask.reshape(-1)
+        if flat.numel() > 0 and not bool(flat[0].item()):
+            return ~mask
+        return mask
+
+    flat = mask.reshape(-1)
+    if flat.numel() > 0 and float(flat[0].item()) == 0.0:
+        return mask == 0
+    return mask != 0
+
+
 class SpacyTokenizer:
     def __init__(self, language: str):
         self.language = language
@@ -161,6 +175,7 @@ class ScaledDotProductAttention(nn.Module):
             scores = scores / math.sqrt(query.size(-1))
 
         if mask is not None:
+            mask = mask_to_keep(mask)
             if mask.dim() == 2:
                 if mask.size(0) == query.size(0) and mask.size(1) == key.size(-2):
                     mask = mask.unsqueeze(1).unsqueeze(2)
@@ -224,9 +239,7 @@ class MultiHeadAttention(nn.Module):
         if mask is None:
             return None
 
-        keep_mask = mask
-        if keep_mask.dtype == torch.bool:
-            keep_mask = keep_mask.to(dtype=dtype)
+        keep_mask = mask_to_keep(mask)
 
         if keep_mask.dim() == 2 and keep_mask.size(0) == batch_size:
             if keep_mask.size(1) == query_len:
