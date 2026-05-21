@@ -16,7 +16,11 @@ def set_seed(seed: int = 42) -> None:
 
 
 def get_device() -> torch.device:
-    return torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 def shift_target(tgt: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -36,11 +40,34 @@ def gradient_norm(model: torch.nn.Module) -> float:
 def prediction_confidence(logits: torch.Tensor, target: torch.Tensor, pad_idx: int) -> float:
     with torch.no_grad():
         probs = F.softmax(logits, dim=-1)
-        confidence = probs.max(dim=-1).values
         mask = target != pad_idx
         if mask.sum().item() == 0:
             return 0.0
-        return confidence[mask].mean().item()
+
+        target_probs = probs.gather(dim=-1, index=target.unsqueeze(-1)).squeeze(-1)
+        return target_probs[mask].mean().item()
+
+
+def token_accuracy(logits: torch.Tensor, target: torch.Tensor, pad_idx: int) -> float:
+    with torch.no_grad():
+        predictions = logits.argmax(dim=-1)
+        mask = target != pad_idx
+        if mask.sum().item() == 0:
+            return 0.0
+        correct = (predictions == target) & mask
+        return correct.sum().item() / mask.sum().item()
+
+
+def named_gradient_norm(model: torch.nn.Module, include_terms: Tuple[str, ...]) -> float:
+    total = 0.0
+    for name, parameter in model.named_parameters():
+        if parameter.grad is None:
+            continue
+        if not any(term in name for term in include_terms):
+            continue
+        param_norm = parameter.grad.detach().data.norm(2).item()
+        total += param_norm * param_norm
+    return math.sqrt(total)
 
 
 def strip_special_tokens(ids: List[int], vocab) -> List[int]:
@@ -115,6 +142,35 @@ def evaluate_loss(model, data_loader, criterion, device, pad_idx: int, max_batch
         batches += 1
 
     return total_loss / max(batches, 1)
+
+
+@torch.no_grad()
+def evaluate_token_metrics(
+    model,
+    data_loader,
+    device,
+    pad_idx: int,
+    max_batches: Optional[int] = None,
+) -> Tuple[float, float]:
+    model.eval()
+    total_accuracy = 0.0
+    total_confidence = 0.0
+    batches = 0
+
+    for batch_idx, (src, tgt) in enumerate(data_loader):
+        if max_batches is not None and batch_idx >= max_batches:
+            break
+
+        src = src.to(device)
+        tgt = tgt.to(device)
+        decoder_input, expected = shift_target(tgt)
+        logits, _ = model(src, decoder_input)
+
+        total_accuracy += token_accuracy(logits, expected, pad_idx)
+        total_confidence += prediction_confidence(logits, expected, pad_idx)
+        batches += 1
+
+    return total_accuracy / max(batches, 1), total_confidence / max(batches, 1)
 
 
 @torch.no_grad()

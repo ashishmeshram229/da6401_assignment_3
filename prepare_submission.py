@@ -28,7 +28,9 @@ def patch_model_file(src_path: str, dst_path: str, drive_id: str) -> None:
 
 def inspect_checkpoint(path: str) -> None:
     if not os.path.exists(path):
-        raise FileNotFoundError(f"Missing checkpoint: {path}")
+        print(f"checkpoint_local_file: missing ({path})")
+        print("checkpoint_check: skipped because the submission will download from Google Drive")
+        return
 
     checkpoint = torch.load(path, map_location="cpu")
     if not isinstance(checkpoint, dict) or "model_state_dict" not in checkpoint:

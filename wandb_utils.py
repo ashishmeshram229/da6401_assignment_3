@@ -18,6 +18,9 @@ def init_wandb(config: Dict, run_name: Optional[str] = None, group: Optional[str
     import wandb
 
     try:
+        if os.environ.get("WANDB_API_KEY"):
+            wandb.login(key=os.environ["WANDB_API_KEY"], relogin=True)
+
         return wandb.init(
             project=config.get("wandb_project", "da6401-assignment-3"),
             entity=config.get("wandb_entity"),
@@ -125,6 +128,36 @@ def log_attention_heatmap(
     )
     run.log({name: wandb.Image(fig)}, step=step)
     plt.close(fig)
+
+
+def log_encoder_head_heatmaps(
+    run,
+    attention_maps: Dict,
+    source_tokens: List[str],
+    step: int,
+    layer: int = -1,
+    prefix: str = "attention/encoder_last",
+) -> None:
+    if run is None:
+        return
+
+    encoder_maps = attention_maps.get("encoder", [])
+    if not encoder_maps:
+        return
+
+    import wandb
+
+    attention = encoder_maps[layer][0]
+    for head_idx in range(attention.size(0)):
+        head_attention = attention[head_idx, : len(source_tokens), : len(source_tokens)]
+        fig = make_attention_figure(
+            head_attention,
+            source_tokens=source_tokens,
+            target_tokens=source_tokens,
+            title=f"Encoder layer {layer}, head {head_idx}",
+        )
+        run.log({f"{prefix}_head_{head_idx}": wandb.Image(fig)}, step=step)
+        plt.close(fig)
 
 
 def save_attention_heatmap(

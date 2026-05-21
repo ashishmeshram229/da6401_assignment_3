@@ -15,8 +15,8 @@ SOS_TOKEN = "<sos>"
 EOS_TOKEN = "<eos>"
 
 
-# Fill this after uploading the best checkpoint to Google Drive.
-DEFAULT_GOOGLE_DRIVE_FILE_ID = os.environ.get("17CKLd40ZHJoUzX0IcDMOobDM0oaKrlmr", "")
+# Google Drive file id for the trained checkpoint.
+DEFAULT_GOOGLE_DRIVE_FILE_ID = os.environ.get("DA6401_WEIGHT_FILE_ID", "1FtCkmIFWONDXQ6eR43dbGa-WIQ8RkBSH")
 
 
 def get_default_device() -> torch.device:
@@ -816,7 +816,7 @@ class Transformer(nn.Module):
         except ImportError as exc:
             raise ImportError("gdown is required for downloading pretrained weights.") from exc
 
-        gdown.download(id=google_drive_file_id, output=self.weight_path, quiet=False, fuzzy=True)
+        gdown.download(id=google_drive_file_id, output=self.weight_path, quiet=False)
 
     def _read_checkpoint(self):
         if not os.path.exists(self.weight_path):

@@ -15,12 +15,16 @@ SOS_TOKEN = "<sos>"
 EOS_TOKEN = "<eos>"
 
 
-# Fill this after uploading the best checkpoint to Google Drive.
-DEFAULT_GOOGLE_DRIVE_FILE_ID = os.environ.get("17CKLd40ZHJoUzX0IcDMOobDM0oaKrlmr", "")
+# Google Drive file id for the trained checkpoint.
+DEFAULT_GOOGLE_DRIVE_FILE_ID = os.environ.get("DA6401_WEIGHT_FILE_ID", "1FtCkmIFWONDXQ6eR43dbGa-WIQ8RkBSH")
 
 
 def get_default_device() -> torch.device:
-    return torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 def normalize_drive_id(file_id_or_url: str) -> str:
@@ -200,7 +204,8 @@ class ScaledDotProductAttention(nn.Module):
             elif mask.dim() == 3:
                 mask = mask.unsqueeze(1)
             mask = mask.to(device=scores.device)
-            scores = scores.masked_fill(mask == 0, -1e9)
+            mask_value = torch.finfo(scores.dtype).min
+            scores = scores.masked_fill(mask == 0, mask_value)
 
         attention = torch.softmax(scores, dim=-1)
         attention = self.dropout(attention)
@@ -816,7 +821,7 @@ class Transformer(nn.Module):
         except ImportError as exc:
             raise ImportError("gdown is required for downloading pretrained weights.") from exc
 
-        gdown.download(id=google_drive_file_id, output=self.weight_path, quiet=False, fuzzy=True)
+        gdown.download(id=google_drive_file_id, output=self.weight_path, quiet=False)
 
     def _read_checkpoint(self):
         if not os.path.exists(self.weight_path):

@@ -53,7 +53,7 @@ def get_sentence(example: Dict, language: str) -> str:
     raise KeyError(f"Could not find language '{language}' in example keys: {list(example.keys())}")
 
 
-def load_multi30k():
+def load_multi30k(keep_in_memory: bool = False):
     cached = load_cached_multi30k()
     if cached is not None:
         return cached
@@ -67,15 +67,15 @@ def load_multi30k():
     for name, config in candidates:
         try:
             if config is None:
-                return load_dataset(name)
-            return load_dataset(name, config)
+                return load_dataset(name, keep_in_memory=keep_in_memory)
+            return load_dataset(name, config, keep_in_memory=keep_in_memory)
         except Exception as exc:
             last_error = exc
             try:
                 download_config = DownloadConfig(local_files_only=True)
                 if config is None:
-                    return load_dataset(name, download_config=download_config)
-                return load_dataset(name, config, download_config=download_config)
+                    return load_dataset(name, download_config=download_config, keep_in_memory=keep_in_memory)
+                return load_dataset(name, config, download_config=download_config, keep_in_memory=keep_in_memory)
             except Exception:
                 pass
 
@@ -194,8 +194,10 @@ def make_dataloaders(
     max_len: int = 100,
     num_workers: int = 0,
     vocab_dir: str = "vocab",
+    keep_in_memory: bool = False,
+    pin_memory: bool = False,
 ):
-    raw_data = load_multi30k()
+    raw_data = load_multi30k(keep_in_memory=keep_in_memory)
 
     train_split = raw_data["train"]
     valid_key = "validation" if "validation" in raw_data else "valid"
@@ -235,6 +237,7 @@ def make_dataloaders(
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
+        pin_memory=pin_memory,
         collate_fn=lambda batch: collate_batch(batch, src_vocab.pad_idx, tgt_vocab.pad_idx),
     )
     valid_loader = DataLoader(
@@ -242,6 +245,7 @@ def make_dataloaders(
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
+        pin_memory=pin_memory,
         collate_fn=lambda batch: collate_batch(batch, src_vocab.pad_idx, tgt_vocab.pad_idx),
     )
     test_loader = None
@@ -251,6 +255,7 @@ def make_dataloaders(
             batch_size=batch_size,
             shuffle=False,
             num_workers=num_workers,
+            pin_memory=pin_memory,
             collate_fn=lambda batch: collate_batch(batch, src_vocab.pad_idx, tgt_vocab.pad_idx),
         )
 

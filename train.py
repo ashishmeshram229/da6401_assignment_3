@@ -13,8 +13,10 @@ from scheduler import make_scheduler
 from utils import (
     evaluate_bleu,
     evaluate_loss,
+    evaluate_token_metrics,
     get_device,
     gradient_norm,
+    named_gradient_norm,
     prediction_confidence,
     sample_translations,
     save_checkpoint,
@@ -25,6 +27,7 @@ from wandb_utils import (
     head_specialization_stats,
     init_wandb,
     log_attention_heatmap,
+    log_encoder_head_heatmaps,
     log_metrics,
     log_translation_table,
 )
@@ -58,6 +61,8 @@ DEFAULT_CONFIG = {
     "min_freq": 2,
     "max_vocab_size": 12000,
     "num_workers": 0,
+    "keep_dataset_in_memory": False,
+    "pin_memory": False,
     "eval_max_batches": None,
     "bleu_max_batches": None,
     "bleu_max_samples": None,
@@ -66,6 +71,7 @@ DEFAULT_CONFIG = {
     "eval_every": 1,
     "sample_limit": 5,
     "attention_rollout_logging": True,
+    "log_qk_grad_steps": 1000,
     "use_wandb": True,
     "wandb_project": "da6401-assignment-3",
     "group": "main_training",
@@ -147,6 +153,13 @@ def log_attention_examples(run, model, valid_loader, src_vocab, tgt_vocab, devic
         layer=-1,
         head=0,
     )
+    log_encoder_head_heatmaps(
+        run,
+        attention_maps,
+        source_tokens=source_tokens,
+        step=step,
+        layer=-1,
+    )
 
     stats = {}
     stats.update(head_specialization_stats(attention_maps["encoder"], "attention/encoder"))
@@ -170,6 +183,7 @@ def train_one_epoch(
     run,
     epoch,
     global_step,
+    scaler=None,
 ):
     model.train()
     optimizer.zero_grad(set_to_none=True)
@@ -188,10 +202,15 @@ def train_one_epoch(
         tgt = tgt.to(device)
 
         decoder_input, expected = shift_target(tgt)
-        logits, _ = model(src, decoder_input)
-        loss = compute_loss(criterion, logits, expected)
+        use_amp = scaler is not None and scaler.is_enabled()
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+            logits, _ = model(src, decoder_input)
+            loss = compute_loss(criterion, logits, expected)
         scaled_loss = loss / accumulation_steps
-        scaled_loss.backward()
+        if use_amp:
+            scaler.scale(scaled_loss).backward()
+        else:
+            scaled_loss.backward()
 
         confidence = prediction_confidence(logits.detach(), expected, model.tgt_pad_idx)
         total_loss += loss.item()
@@ -200,25 +219,41 @@ def train_one_epoch(
 
         should_step = (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(train_loader)
         if should_step:
+            if use_amp:
+                scaler.unscale_(optimizer)
+
             grad_norm = gradient_norm(model)
+            query_grad_norm = named_gradient_norm(model, ("w_q.weight", "w_q.bias"))
+            key_grad_norm = named_gradient_norm(model, ("w_k.weight", "w_k.bias"))
             torch.nn.utils.clip_grad_norm_(model.parameters(), config["clip_grad"])
-            optimizer.step()
+            if use_amp:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
             lr = scheduler.step()
             optimizer.zero_grad(set_to_none=True)
 
             global_step += 1
-            if global_step % config["log_every"] == 0:
+            if global_step <= config.get("log_qk_grad_steps", 1000):
                 log_metrics(
                     run,
                     {
-                        "train/loss": total_loss / batches,
-                        "train/prediction_confidence": total_confidence / batches,
-                        "train/gradient_norm": grad_norm,
-                        "train/learning_rate": lr,
-                        "epoch": epoch,
+                        "gradients/query_norm": query_grad_norm,
+                        "gradients/key_norm": key_grad_norm,
                     },
                     step=global_step,
                 )
+
+            if global_step % config["log_every"] == 0:
+                metrics = {
+                    "train/loss": total_loss / batches,
+                    "train/correct_token_confidence": total_confidence / batches,
+                    "train/gradient_norm": grad_norm,
+                    "train/learning_rate": lr,
+                    "epoch": epoch,
+                }
+                log_metrics(run, metrics, step=global_step)
 
         progress.set_postfix(loss=total_loss / batches)
 
@@ -240,6 +275,8 @@ def run_training(config):
         max_len=config["max_len"],
         num_workers=config["num_workers"],
         vocab_dir=vocab_dir,
+        keep_in_memory=config.get("keep_dataset_in_memory", False),
+        pin_memory=config.get("pin_memory", False),
     )
 
     model = make_model(config, src_vocab, tgt_vocab, device)
@@ -252,6 +289,7 @@ def run_training(config):
         weight_decay=config["weight_decay"],
     )
     scheduler = make_scheduler(optimizer, config)
+    scaler = torch.amp.GradScaler("cuda", enabled=config.get("mixed_precision", False) and device.type == "cuda")
 
     run = init_wandb(config, run_name=config.get("run_name"), group=config.get("group"))
 
@@ -273,6 +311,7 @@ def run_training(config):
             run=run,
             epoch=epoch,
             global_step=global_step,
+            scaler=scaler,
         )
 
         if epoch % config["eval_every"] == 0:
@@ -280,6 +319,13 @@ def run_training(config):
                 model,
                 valid_loader,
                 criterion,
+                device,
+                pad_idx=tgt_vocab.pad_idx,
+                max_batches=config["eval_max_batches"],
+            )
+            valid_accuracy, valid_confidence = evaluate_token_metrics(
+                model,
+                valid_loader,
                 device,
                 pad_idx=tgt_vocab.pad_idx,
                 max_batches=config["eval_max_batches"],
@@ -306,8 +352,10 @@ def run_training(config):
             metrics = {
                 "epoch": epoch,
                 "train/epoch_loss": train_loss,
-                "train/epoch_prediction_confidence": train_confidence,
+                "train/epoch_correct_token_confidence": train_confidence,
                 "valid/loss": valid_loss,
+                "valid/token_accuracy": valid_accuracy,
+                "valid/correct_token_confidence": valid_confidence,
                 "valid/bleu": valid_bleu,
                 "time/minutes": (time.time() - start_time) / 60.0,
             }
@@ -423,6 +471,19 @@ def experiment_configs(base_config):
         }
     )
     experiments.append(learned_config)
+
+    attention_config = deepcopy(base_config)
+    attention_config.update(
+        {
+            "group": "attention_visualization",
+            "run_name": "attention_head_analysis",
+            "use_noam": True,
+            "use_scaling": True,
+            "label_smoothing": 0.1,
+            "positional_encoding": "sinusoidal",
+        }
+    )
+    experiments.append(attention_config)
 
     smoothing_config = deepcopy(base_config)
     smoothing_config.update(
